@@ -1,0 +1,602 @@
+#include "raylib.h"
+#include "rlgl.h"
+#include "raymath.h"
+#include <stdlib.h>
+#include <stdio.h> // For sprintf
+#include <time.h> // For rand seeding
+
+//--------------------------------------------------------------------------------------
+// Constants & Definitions
+//--------------------------------------------------------------------------------------
+    #define GRID_WIDTH 30
+    #define GRID_HEIGHT 30
+    #define CELL_SIZE 2.0f
+
+    typedef enum {
+        CELL_AIR = 0,
+        CELL_WALL,
+        CELL_ROBOT,
+        CELL_MINE,
+        CELL_PERSON,
+    } CellType;
+
+    Color cellFillColours[] = {DARKGRAY,
+                       BLUE,
+                       RED,
+                       GREEN,
+                       };
+    Color cellOutlineColours[] = {GRAY,
+                       DARKGRAY,
+                       DARKGRAY,
+                       DARKGRAY,
+                       };
+
+
+    typedef enum {
+        STATE_MENU,
+        STATE_PLAYING,
+        STATE_GAME_OVER
+    } GameState;
+
+    typedef enum {
+        NORTH,
+        EAST,
+        SOUTH,
+        WEST,
+    } Direction;
+
+    // The order MUST match the enum order above!
+    static const Vector2 DIR_VECTORS[] = {
+        { 0, -1 }, // Matches NORTH (0)
+        { 1,  0 }, // Matches EAST (1)
+        { 0,  1 }, // Matches SOUTH (2)
+        {-1,  0 }  // Matches WEST (3)
+    };
+
+    typedef struct {
+        Vector2 position;
+        Direction direction;
+        float liklihoodToMove;
+        float liklihoodToTurn;
+    } MovingEntity;
+
+    typedef struct {
+        Vector2 position;
+        Direction direction;
+        int moveCooldown; // number of frames between robot moves
+    } Robot;
+
+    // The Context struct holds all game data so we can pass it around easily
+    typedef struct {
+        GameState currentState;
+        Camera3D camera;
+        // The grid stores integers representing each tile.
+        // I store the posiitions of the entities in their struct.
+        // I will have to keep the grid in sync with their positions in the structs though.
+        int grid[GRID_WIDTH][GRID_HEIGHT];
+        int currentLevel;
+        int score;
+        bool paused;
+        bool orbitMode;
+        Robot robot;
+        MovingEntity people[5];
+        int mineCount;
+        MovingEntity* mines;
+        float peopleMaxMovesPerSec;
+        float minesMaxMovesPerSec;
+        bool aiModeEnabled; // true -> ai mode. false -> manual mode
+        int frameCount;
+        
+        // Cursors for gameplay
+        Vector2 lastGridCellFocused;
+        Vector2 gridCellFocused;
+    } GameContext;
+
+//--------------------------------------------------------------------------------------
+// Function Declarations
+//--------------------------------------------------------------------------------------
+    void InitGame(GameContext *ctx);
+    void AdvanceLevel(GameContext *ctx); // Clears grid for new level
+
+    // The three "Screen" functions
+    void UpdateDrawMenu(GameContext *ctx);
+    void UpdateDrawGameplay(GameContext *ctx);
+    void UpdateDrawGameOver(GameContext *ctx);
+
+    // Your existing helpers
+    void PaintGridLine(GameContext *ctx, int x0, int y0, int x1, int y1, int value);
+    void UpdateCustomCamera(Camera3D *camera, bool *orbitMode);
+    void HandleGridInteraction(GameContext *ctx);
+    void DrawGameScene(GameContext *ctx);
+
+    int min(int a, int b);
+
+//--------------------------------------------------------------------------------------
+// Main Entry Point
+//--------------------------------------------------------------------------------------
+int main(void)
+{
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
+    InitWindow(800, 450, "Robot Save the People - State Machine, A* Algo");
+
+    // Initialise the Game Context (Camera, vars, etc)
+    GameContext ctx = { 0 };
+    InitGame(&ctx);
+
+    SetTargetFPS(60);
+
+    while (!WindowShouldClose())
+    {
+        // THE STATE MACHINE
+        switch (ctx.currentState)
+        {
+            case STATE_MENU:
+                UpdateDrawMenu(&ctx);
+                break;
+            case STATE_PLAYING:
+                UpdateDrawGameplay(&ctx);
+                break;
+            case STATE_GAME_OVER:
+                UpdateDrawGameOver(&ctx);
+                break;
+        }
+    }
+
+    CloseWindow();
+    return 0;
+}
+
+void MoveEntity(GameContext *ctx, MovingEntity *entity, CellType entityCellType, Vector2 *pos, Direction *dir) {
+    Vector2* dirVec = &DIR_VECTORS[*dir];
+    Vector2 futurePos = Vector2Add(*pos, *dirVec); 
+    
+    // If we're moving into air, and its not outside the grid, then move
+    if (ctx->grid[(int)futurePos.x][(int)futurePos.y] == CELL_AIR
+        && futurePos.x < GRID_WIDTH && futurePos.x >= 0
+        && futurePos.y < GRID_HEIGHT && futurePos.y >= 0
+    ) {
+        ctx->grid[(int)pos->x][(int)pos->y] = CELL_AIR;
+        *pos = futurePos;
+        ctx->grid[(int)futurePos.x][(int)futurePos.y] = entityCellType;
+    }
+}
+
+void MoveMovingEntity(GameContext *ctx, MovingEntity *entity, CellType entityCellType) {
+    if (rand() < entity->liklihoodToTurn * RAND_MAX) {
+        entity->direction = (entity->direction + rand() % 2) % 4;
+    }
+    if (rand() < entity->liklihoodToMove * RAND_MAX) {
+        MoveEntity(ctx, entity, entityCellType, &entity->position, &entity->direction);
+    }
+}
+
+void TurnRobotWithAI(GameContext *ctx) {
+    // Calculate Weighted A* Algo path
+    // Store, so we can display to user
+    
+    // Turn in direction necessary to reach next node in path
+
+}
+                
+Direction GetCameraForwardDirection(Camera3D camera) {
+    Vector3 forward = Vector3Subtract(camera.target, camera.position);
+    
+    // Determine major axis
+    if (fabsf(forward.z) > fabsf(forward.x)) {
+        return (forward.z < 0) ? NORTH : SOUTH;
+    } else {
+        return (forward.x > 0) ? EAST : WEST;
+    }
+}
+                
+void TurnRobotWithUserInputs(GameContext *ctx) {
+    Direction camForward = GetCameraForwardDirection(ctx->camera);
+    int baseDir = (int)camForward;
+
+    if (IsKeyDown(KEY_W)) ctx->robot.direction = (Direction)((baseDir + 0) % 4);
+    if (IsKeyDown(KEY_D)) ctx->robot.direction = (Direction)((baseDir + 1) % 4);
+    if (IsKeyDown(KEY_S)) ctx->robot.direction = (Direction)((baseDir + 2) % 4);
+    if (IsKeyDown(KEY_A)) ctx->robot.direction = (Direction)((baseDir + 3) % 4);
+}
+
+//--------------------------------------------------------------------------------------
+// State Functions
+//--------------------------------------------------------------------------------------
+void UpdateDrawMenu(GameContext *ctx)
+{
+    // Update
+    if (IsKeyPressed(KEY_ENTER) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || IsKeyPressed(KEY_SPACE))
+    {
+        ctx->currentLevel = 0;
+        ctx->score = 0;
+        AdvanceLevel(ctx); // Clear grid and setup level 1
+        ctx->currentState = STATE_PLAYING;
+    }
+
+    // Draw
+    BeginDrawing();
+        ClearBackground(RAYWHITE);
+        DrawText("ROBOT RESCUE", GetScreenWidth()/2 - 150, GetScreenHeight()/4, 40, DARKBLUE);
+        DrawText("Press [SPACE] to Start Level 1", GetScreenWidth()/2 - 140, GetScreenHeight()/4 + 50, 20, DARKGRAY);
+    EndDrawing();
+}
+
+void UpdateDrawGameplay(GameContext *ctx) 
+{
+    ctx->frameCount++;
+
+    // Update
+    if (IsKeyPressed(KEY_O)) ctx->orbitMode = !ctx->orbitMode;
+    
+    // Toggle state to Game Over (Temporary - press G to die)
+    if (IsKeyPressed(KEY_G)) ctx->currentState = STATE_GAME_OVER;
+
+    // Pause and unpause logic
+    if (IsKeyPressed(KEY_SPACE)) ctx->paused = !ctx->paused;
+
+    // Change player mode logic
+    if (IsKeyPressed(KEY_M)) ctx->aiModeEnabled = !ctx->aiModeEnabled;
+
+    UpdateCustomCamera(&ctx->camera, &ctx->orbitMode);
+    HandleGridInteraction(ctx);
+
+    if (!ctx->paused)
+    { // Gameplay: Inputs, entity movement, etc 
+        // Move entities
+            // People
+            for (int i=0; i<5; i++) {
+                MoveMovingEntity(ctx, &ctx->people[i], CELL_PERSON);
+            }
+            // Mines
+            for (int i=0; i<ctx->mineCount; i++) {
+                MoveMovingEntity(ctx, &ctx->mines[i], CELL_MINE);
+            }
+        
+        // Move robot
+        // if user, take input every frame, but move robot after every cooldown
+        // if ai, then run A* before every move, so both things have the cooldown
+        if (!ctx->aiModeEnabled) TurnRobotWithUserInputs(ctx);
+
+        if (ctx->frameCount % ctx->robot.moveCooldown == 0) {
+            if (ctx->aiModeEnabled) { TurnRobotWithAI(ctx);}
+            // Move robot
+            // ctx->robot.position;
+            MoveEntity(ctx, (MovingEntity*)&ctx->robot, CELL_ROBOT, &ctx->robot.position, &ctx->robot.direction);
+        }
+
+    }
+
+    // Draw
+    BeginDrawing();
+        ClearBackground(RAYWHITE);
+        
+        DrawGameScene(ctx);
+
+        // HUD
+        int ySpacing = 30;
+        DrawText("L-Click: Paint | R-Click: Erase | M-Click: Pan | O: Orbit | Space: pause | M: Toggle mode", 10, 10, 20, DARKGRAY);
+        DrawText(TextFormat("Level: %d", ctx->currentLevel), 10, 10 + ySpacing, 20, BLACK);
+        DrawText(TextFormat("Mode: %s", ctx->aiModeEnabled ? "AI" : "Manual"), 10, 10 + 2*ySpacing, 20, BLACK);
+        DrawText("Press [G] to Trigger Game Over", 10, 10 + 3*ySpacing, 15, DARKGRAY);
+        if (ctx->paused) DrawText("Press [SPACE] to unpause", GetScreenWidth()/2 - 140, GetScreenHeight()/4 + 50, 20, DARKGRAY);
+    EndDrawing();
+}
+
+void UpdateDrawGameOver(GameContext *ctx)
+{
+    // Update
+    if (IsKeyPressed(KEY_ENTER))
+    {
+        // Restart Game
+            ctx->currentState = STATE_MENU;
+            ctx->currentLevel = 1;
+            ctx->score = 0;
+            ctx->orbitMode = true;
+            ctx->lastGridCellFocused = (Vector2){-1, -1};
+            ctx->gridCellFocused = (Vector2){-1, -1};
+        ctx->currentState = STATE_MENU;
+    }
+
+    // Draw
+    BeginDrawing();
+        ClearBackground(BLACK);
+        DrawText("GAME OVER", 300, 100, 40, RED);
+        
+        DrawText("Leaderboard Placeholder:", 300, 180, 20, WHITE);
+        DrawText("1. AAA - 500", 300, 210, 20, GRAY);
+        DrawText("2. BBB - 300", 300, 240, 20, GRAY);
+        DrawText("3. CCC - 100", 300, 270, 20, GRAY);
+
+        DrawText("Press [ENTER] to Return to Menu", 240, 350, 20, WHITE);
+    EndDrawing();
+}
+
+//--------------------------------------------------------------------------------------
+// Helper Implementations
+//--------------------------------------------------------------------------------------
+
+void InitGame(GameContext *ctx)
+{
+    ctx->currentState = STATE_MENU;
+    ctx->currentLevel = 0;
+    ctx->score = 0;
+    ctx->orbitMode = true;
+    ctx->lastGridCellFocused = (Vector2){-1, -1};
+    ctx->gridCellFocused = (Vector2){-1, -1};
+    ctx->paused = true;
+    ctx->mines = NULL;
+    ctx->mines = malloc(sizeof(MovingEntity));
+    if (ctx->mines == NULL) {
+        printf("\nmalloc() failed. No free space in memory. Program exiting.\n");
+        exit(EXIT_FAILURE);
+    }
+    ctx->mineCount = 0;
+    ctx->robot.position = (Vector2){4, 4};
+    ctx->robot.moveCooldown = 30;
+    ctx->aiModeEnabled = true;
+
+    ctx->peopleMaxMovesPerSec = 3.0f;
+    ctx->minesMaxMovesPerSec = 5.0f;
+
+    // Setup Camera
+    ctx->camera.position = (Vector3){ 0.0f, 30.0f, 20.0f };
+    ctx->camera.target = (Vector3){ GRID_WIDTH*CELL_SIZE/2, 0.0f, GRID_HEIGHT*CELL_SIZE/2 };
+    ctx->camera.up = (Vector3){ 0.0f, 1.0f, 0.0f };
+    ctx->camera.fovy = 50.0f;
+    ctx->camera.projection = CAMERA_PERSPECTIVE;
+
+    // Init grid plus shape
+    for (int i=4; i<GRID_WIDTH-4; i++) {ctx->grid[i][GRID_HEIGHT/2] = CELL_WALL;}
+    for (int i=4; i<GRID_HEIGHT-4; i++) {ctx->grid[GRID_WIDTH/2][i] = CELL_WALL;}
+
+    // Set people random movement speeds
+    for (int i=0; i<5; i++) {
+        ctx->people[i].liklihoodToMove = ctx->peopleMaxMovesPerSec * rand() / RAND_MAX / 60.0f;
+        ctx->people[i].liklihoodToTurn = 0.5 * ctx->peopleMaxMovesPerSec * rand() / RAND_MAX / 60.0f;
+    }
+}
+
+void AdvanceLevel(GameContext *ctx)
+{
+    // Wipe the grid of people and mines
+        for(int x=0; x<GRID_WIDTH; x++) {
+            for(int y=0; y<GRID_HEIGHT; y++) {
+                ctx->grid[x][y] = (ctx->grid[x][y] == CELL_WALL ? CELL_WALL : CELL_AIR);
+            }
+        }
+        // Correspondingly, set the mines and persons positions to -1
+            for (int i=0; i<5; i++) {
+                ctx->people[i].position = (Vector2){-1, -1};
+            }
+            for (int i=0; i<ctx->mineCount; i++) {
+                ctx->mines[i].position = (Vector2){-1, -1};
+            }
+        
+    ctx->currentLevel += 1;
+    ctx->paused = true;
+    ctx->robot.position = (Vector2){3*GRID_HEIGHT/4, GRID_WIDTH/4};
+    ctx->grid[3*GRID_HEIGHT/4][GRID_WIDTH/4] = CELL_ROBOT;
+    const int maxMines = 50;
+    ctx->mineCount = min(ctx->currentLevel*5, maxMines);
+    
+    // 
+    ctx->mines = realloc(ctx->mines, sizeof(MovingEntity)*ctx->mineCount);
+    if (ctx->mines == NULL) {
+        printf("\nrealloc() failed. No free space in memory. Program exiting.\n");
+        exit(EXIT_FAILURE);
+    }
+
+    
+    // Spawn mines and people
+        // Use level number as seed
+        srand(ctx->currentLevel);
+
+        // Place people
+        int max_attempts = 10;
+        int x;
+        int y;
+        for (int i=0; i<5; i++) {
+            int attempt = 0;
+            do {
+                attempt++;
+                x = rand() % GRID_WIDTH;
+                y = rand() % GRID_HEIGHT;
+
+                if (ctx->grid[x][y] != CELL_AIR) continue;
+                ctx->people[i].position = (Vector2){x, y};
+                ctx->people[i].direction = rand() % 4;
+                ctx->grid[x][y] = CELL_PERSON;
+                break;
+            } while (attempt < max_attempts);            
+        }
+        for (int i=0; i<ctx->mineCount; i++) {
+            int attempt = 0;
+            while (attempt < max_attempts) {
+                attempt++;
+                x = rand() % GRID_WIDTH;
+                y = rand() % GRID_HEIGHT;
+
+                if (ctx->grid[x][y] != CELL_AIR) continue;
+
+                ctx->mines[i].position = (Vector2){x, y};
+                ctx->mines[i].direction = rand() % 4;
+                // Set mines random movement speeds
+                ctx->mines[i].liklihoodToMove = ctx->minesMaxMovesPerSec * rand() / RAND_MAX / 60.0f;
+                ctx->mines[i].liklihoodToTurn = 0.5f;
+                ctx->grid[x][y] = CELL_MINE;
+
+                break;
+            }
+            if (attempt >= max_attempts) { printf("Max spawn attempts exceeded."); }            
+        }
+
+
+}
+
+//--------------------------------------------------------------------------------------
+// Core Logic Functions
+//--------------------------------------------------------------------------------------
+
+void UpdateCustomCamera(Camera3D *camera, bool *orbitMode)
+{
+    float panSensitivity = 0.1f; 
+
+    // Panning (Middle Mouse)
+    if (IsMouseButtonDown(MOUSE_BUTTON_MIDDLE))
+    {
+        Vector2 mouseDelta = GetMouseDelta();
+
+        // Calculate vectors for flat ground movement
+        Vector3 forward = Vector3Subtract(camera->target, camera->position);
+        Vector3 right = Vector3CrossProduct(forward, (Vector3){ 0.0f, 1.0f, 0.0f });
+        right = Vector3Normalize(right);
+
+        Vector3 forwardGround = Vector3CrossProduct((Vector3){ 0.0f, 1.0f, 0.0f }, right);
+        forwardGround = Vector3Normalize(forwardGround);
+
+        // Apply movement to both position and target to keep view angle constant
+        Vector3 move = Vector3Add(
+            Vector3Scale(right, -mouseDelta.x * panSensitivity),
+            Vector3Scale(forwardGround, mouseDelta.y * panSensitivity)
+        );
+
+        camera->position = Vector3Add(camera->position, move);
+        camera->target = Vector3Add(camera->target, move);
+    }
+    // Orbiting (Standard Raylib Orbital Camera)
+    else if (*orbitMode)
+    {
+        UpdateCamera(camera, CAMERA_ORBITAL);
+    }
+    // Zooming only (when Orbit is disabled)
+    else
+    {
+        float wheel = GetMouseWheelMove();
+        if (wheel != 0)
+        {
+            Vector3 move = Vector3Scale(Vector3Normalize(Vector3Subtract(camera->target, camera->position)), wheel * 2.0f);
+            camera->position = Vector3Add(camera->position, move);
+        }
+    }
+}
+
+void HandleGridInteraction(GameContext *ctx)
+{
+    Ray ray = GetScreenToWorldRay(GetMousePosition(), ctx->camera);
+
+    // Ray-Plane Intersection (Ground is at Y=0, Normal is (0,1,0))
+    // t = (center - ray.pos) . normal / (ray.dir . normal)
+    float t = -ray.position.y / ray.direction.y;
+    
+    // Reset cursor validity
+    ctx->gridCellFocused.x = -1;
+    ctx->gridCellFocused.y = -1;
+
+    // Check if we hit the floor (t >= 0 means hit in front of camera)
+    if (t >= 0)
+    {
+        Vector3 hitPoint = Vector3Add(ray.position, Vector3Scale(ray.direction, t));
+
+        int gridX = (int)(hitPoint.x / CELL_SIZE);
+        int gridY = (int)(hitPoint.z / CELL_SIZE);
+
+        // Check if inside Grid Boundaries
+        if (gridX >= 0 && gridX < GRID_WIDTH && gridY >= 0 && gridY < GRID_HEIGHT)
+        {
+            ctx->gridCellFocused = (Vector2){ (float)gridX, (float)gridY };
+
+            // Handle Painting
+            if (ctx->aiModeEnabled && (IsMouseButtonDown(MOUSE_BUTTON_LEFT) || IsMouseButtonDown(MOUSE_BUTTON_RIGHT)))
+            {
+                int paintValue = IsMouseButtonDown(MOUSE_BUTTON_LEFT) ? CELL_WALL : CELL_AIR;
+
+                // Interpolate line if we have a valid previous position to prevent gaps
+                if (ctx->lastGridCellFocused.x != -1 && ctx->lastGridCellFocused.y != -1)
+                {
+                    PaintGridLine(ctx, (int)ctx->lastGridCellFocused.x, (int)ctx->lastGridCellFocused.y, gridX, gridY, paintValue);
+                }
+                else
+                {
+                    ctx->grid[gridX][gridY] = paintValue;
+                }
+            }
+            
+            ctx->lastGridCellFocused = ctx->gridCellFocused;
+            return; // Exit early since we processed a valid hit
+        }
+    }
+
+    // If we missed the floor or the grid, invalidate history
+    ctx->lastGridCellFocused = (Vector2){ -1, -1 };
+}
+
+void DrawGameScene(GameContext *ctx)
+{
+    BeginMode3D(ctx->camera);
+
+
+    for (int x = 0; x < GRID_WIDTH; x++)
+    {
+        for (int y = 0; y < GRID_HEIGHT; y++)
+        {
+            Vector3 cellPos = {
+                (x * CELL_SIZE) + CELL_SIZE/2, 
+                0.0f, 
+                (y * CELL_SIZE) + CELL_SIZE/2
+            };
+
+            if (ctx->grid[x][y] != CELL_AIR)
+            {
+                DrawCube(cellPos, CELL_SIZE, CELL_SIZE, CELL_SIZE, cellFillColours[ctx->grid[x][y]-1]);
+                DrawCubeWires(cellPos, CELL_SIZE, CELL_SIZE, CELL_SIZE, cellOutlineColours[ctx->grid[x][y]-1]);
+            }
+            else
+            {
+                // Draw faint floor outline
+                cellPos.y = -CELL_SIZE/2;
+                DrawCubeWires(cellPos, CELL_SIZE, 0.0f, CELL_SIZE, LIGHTGRAY);
+            }
+        }
+    }
+
+    // Draw Cursor Highlight
+    if (ctx->gridCellFocused.x != -1 && ctx->gridCellFocused.y != -1)
+    {
+        Vector3 highlightPos = {
+            (ctx->gridCellFocused.x * CELL_SIZE) + CELL_SIZE/2, -CELL_SIZE/4, 
+            (ctx->gridCellFocused.y * CELL_SIZE) + CELL_SIZE/2
+        };
+        DrawCube(highlightPos, CELL_SIZE, 1.0f, CELL_SIZE, Fade(GRAY, 0.5f));
+        DrawCubeWires(highlightPos, CELL_SIZE, 1.0f, CELL_SIZE, DARKGRAY);
+    }
+
+    EndMode3D();
+}
+
+// Uses Bresenham's Line Algorithm to paint a continuous line of cells
+void PaintGridLine(GameContext *ctx, int x0, int y0, int x1, int y1, int value)
+{
+    int dx = abs(x1 - x0);
+    int dy = abs(y1 - y0);
+    int sx = (x0 < x1) ? 1 : -1;
+    int sy = (y0 < y1) ? 1 : -1;
+    int err = dx - dy;
+
+    while (true)
+    {
+        if (ctx->grid[x0][y0] <= 1 && x0 >= 0 && x0 < GRID_WIDTH && y0 >= 0 && y0 < GRID_HEIGHT)
+        {
+            ctx->grid[x0][y0] = value;
+        }
+
+        if (x0 == x1 && y0 == y1) break;
+        
+        int e2 = 2 * err;
+        if (e2 > -dy) { err -= dy; x0 += sx; }
+        if (e2 < dx) { err += dx; y0 += sy; }
+    }
+}
+
+int min(int a, int b) {
+    return a < b ? a : b;
+}
