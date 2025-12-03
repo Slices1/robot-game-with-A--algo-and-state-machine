@@ -1,10 +1,10 @@
-
-
 # Robot Save the People
 
 ![Game Screenshot](resources-for-README/screenshot-1.png)
 
-A 3D grid-based puzzle game where you guide a robot to rescue people whilst avoiding mines and navigating procedurally generated levels. Features an integrated A* pathfinding visualisation and a custom 3D interface.
+A 3D grid-based puzzle game where you guide a robot to rescue people whilst avoiding mines and navigating procedurally generated levels. 
+
+**Note:** This project uses the **Raylib** graphics library instead of ncurses to provide an innovative 3D graphical version of the assignment.
 
 ## Features
 
@@ -26,7 +26,6 @@ A 3D grid-based puzzle game where you guide a robot to rescue people whilst avoi
 - **Leaderboard System:** Scores (Name, Level, Duration) are saved to a local file (`leaderboard.txt`).
 - **Score Sorting:** The Game Over screen automatically parses, sorts, and displays the top 5 runs based on Level reached (descending) and Duration (ascending).
 
-
 ## Controls
 
 ### General
@@ -34,6 +33,7 @@ A 3D grid-based puzzle game where you guide a robot to rescue people whilst avoi
 - **O:** Toggle camera orbit mode (automatically rotates around the grid).
 - **Space:** Pause / Unpause game.
 - **Scroll Wheel:** Zoom in/out.
+- **Esc/Q:** Exit.
 
 ### Gameplay (Manual Mode)
 - **WASD / Arrow Keys:** Move the robot relative to the camera view.
@@ -45,36 +45,33 @@ A 3D grid-based puzzle game where you guide a robot to rescue people whilst avoi
 - **M:** Toggle AI Mode (Robot navigates automatically).
 - **< / > (Shift + Comma/Period):** Decrease/Increase A* Heuristic weighting (Adjusts AI behaviour aggression).
 
-## How to install dependencies
+## Build Instructions
 
-This project needs raylib.
+**Target Environment:** This project is designed to run on the course-standard **Ubuntu VirtualBox VM** or Linux Mint 22.
 
-Follow [this](https://github.com/raysan5/raylib/wiki/Working-on-GNU-Linux) guide for raylib installation. It is summarised here:
+### 1. Install Dependencies
+Run the following commands to install the required compilers and Raylib dependencies:
 
 ```bash
 sudo apt install build-essential git
 sudo apt install libasound2-dev libx11-dev libxrandr-dev libxi-dev libgl1-mesa-dev libglu1-mesa-dev libxcursor-dev libxinerama-dev libwayland-dev libxkbcommon-dev
 
+# Download and compile Raylib
 git clone --depth 1 [https://github.com/raysan5/raylib.git](https://github.com/raysan5/raylib.git) raylib
 cd raylib/src/
-make PLATFORM=PLATFORM_DESKTOP # To make the static version.
-make PLATFORM=PLATFORM_DESKTOP RAYLIB_LIBTYPE=SHARED # To make the dynamic shared version.
+make PLATFORM=PLATFORM_DESKTOP
+make PLATFORM=PLATFORM_DESKTOP RAYLIB_LIBTYPE=SHARED
 
-# install to standard directories
-sudo make install # Static version.
-sudo make install RAYLIB_LIBTYPE=SHARED # Dynamic shared version.
+# Install to system directories
+sudo make install
+sudo make install RAYLIB_LIBTYPE=SHARED
 ````
 
-## How to run
+### 2\. Compile and Run
 
-**Compilation:**
+Navigate to the project root directory and run:
 
 ```bash
 make
-```
-
-**Running:**
-
-```bash
 ./game
 ```

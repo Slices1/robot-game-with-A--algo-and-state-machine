@@ -1,68 +1,53 @@
-# This makefile should allow for web compilation, should I choose to do so. I would need to install emsdk
-
 .PHONY: all clean
 
+# Default settings
 PLATFORM ?= PLATFORM_DESKTOP
 BUILD_MODE ?= RELEASE
-RAYLIB_PATH ?= ..
-RAYLIB_SRC_PATH ?= $(RAYLIB_PATH)/src
-RAYLIB_LIBTYPE ?= STATIC
 
 # Compiler
-
 CC = gcc
-ifeq ($(PLATFORM),$(filter $(PLATFORM),PLATFORM_WEB))
-	CC = emcc
+ifeq ($(PLATFORM),PLATFORM_WEB)
+    CC = emcc
 endif
 
 # Compiler flags
-
 CFLAGS = -Wall -std=c99 -D_DEFAULT_SOURCE -Wno-missing-braces -Wno-unused-result
 ifeq ($(BUILD_MODE),DEBUG)
-	CFLAGS += -g -D_DEBUG
+    CFLAGS += -g -D_DEBUG
 else
-ifeq ($(PLATFORM),$(filter $(PLATFORM),PLATFORM_WEB))
-	CFLAGS += -O3
-else
-	CFLAGS += -O2
-endif
+    ifeq ($(PLATFORM),PLATFORM_WEB)
+        CFLAGS += -O3
+    else
+        CFLAGS += -O2
+    endif
 endif
 
-# Include and library paths
+# Paths
+# GCC automatically checks /usr/local/include and /usr/local/lib
+INCLUDE_PATHS = -I.
+LDFLAGS = -L.
 
-INCLUDE_PATHS = -I. -I$(RAYLIB_SRC_PATH) -I$(RAYLIB_SRC_PATH)/external
-LDFLAGS = -L$(RAYLIB_SRC_PATH)
 ifeq ($(PLATFORM),PLATFORM_WEB)
-	LDFLAGS += -sTOTAL_MEMORY=134217728 -sFORCE_FILESYSTEM=1 -sEXPORTED_RUNTIME_METHODS=ccall -sMINIFY_HTML=0
-	EXT = .html
+    LDFLAGS += -s USE_GLFW=3 -s ASYNCIFY -s TOTAL_MEMORY=67108864 -s FORCE_FILESYSTEM=1
+    EXT = .html
 endif
 
 # Libraries
-
 ifeq ($(PLATFORM),PLATFORM_DESKTOP)
-	LDLIBS = -lraylib -lGL -lm -lpthread -ldl -lrt -lX11 -latomic
-endif
-ifeq ($(PLATFORM),PLATFORM_WEB)
-	LDLIBS = $(RAYLIB_SRC_PATH)/libraylib.web.a
+    # Standard flags for Raylib on Linux
+    LDLIBS = -lraylib -lGL -lm -lpthread -ldl -lrt -lX11
 endif
 
-# Default target
+# Sources
+SRC = game.c
+TARGET = game
 
-SRC_CODE = game
-all: $(SRC_CODE)
+# Build Rules
+all: $(TARGET)
 
-# Generic build pattern
-
-%: %.c
+$(TARGET): $(SRC)
 	$(CC) -o $@$(EXT) $< $(CFLAGS) $(INCLUDE_PATHS) $(LDFLAGS) $(LDLIBS) -D$(PLATFORM)
 
-# Clean
-
 clean:
-	find . -type f -executable -delete
-	rm -fv *.o
-ifeq ($(PLATFORM),PLATFORM_WEB)
-	rm -f */*.wasm */*.html */*.js */*.data
-endif
+	rm -f $(TARGET) $(TARGET).html $(TARGET).js $(TARGET).wasm $(TARGET).data *.o
 	@echo Cleaning done
-

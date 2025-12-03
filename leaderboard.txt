@@ -1,14 +1,7 @@
 Jamiel,2,62
 Jomson,1,0
 Jathaniel,1,0
-POORSOUL,1,143
 POORSOUL,2,90023
-CRUSHEDSOUL,1,8a,35,11
-a,13,11
-a,8,46
-Shadow,7,41
-a,15,0
-a,4,21
-a,5,44
-a,3,71
-a,10,57
+jonah,4,97
+jonah,148,329
+a,7,60
