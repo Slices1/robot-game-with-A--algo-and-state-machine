@@ -2,7 +2,9 @@
 #include "rlgl.h"
 #include "raymath.h"
 #include <stdlib.h>
-#include <stdio.h> // For sprintf
+#include <stdio.h> // For sprintf, file handling
+#include <string.h> // For strings
+#include <ctype.h> // For isalnum()
 
 //--------------------------------------------------------------------------------------
 // Constants & Definitions
@@ -13,7 +15,15 @@
     #define MAX_LIVES 5
     #define NUM_PEOPLE 5
     #define BATTERY_RADIUS (GRID_WIDTH * CELL_SIZE * 0.8f)    
-
+    #define MAX_LEADERBOARD_ENTRIES 100
+    #define LEADERBOARD_DISPLAY_LIMIT 5
+    #define MAX_PATH_LENGTH (GRID_WIDTH * GRID_HEIGHT) // for weighted A* algo path
+    typedef struct {
+        char name[20];
+        int level;
+        int duration; // seconds
+    } ScoreEntry;
+    
     typedef enum {
         CELL_AIR = 0,
         CELL_WALL,
@@ -96,6 +106,14 @@
         int frameCount;
         int peopleRemaining;
         int livesRemaining;
+
+        char username[20]; // Buffer for the name
+        int usernameLen;   // Current length of name
+
+        // A*
+        Vector2 currentPath[MAX_PATH_LENGTH];
+        int currentPathLen;
+        float AStarHeuristicWeightage;
         
         // Cursors for gameplay
         Vector2 lastGridCellFocused;
@@ -120,8 +138,10 @@
     void UpdateCustomCamera(Camera3D *camera, bool *orbitMode);
     void HandleGridInteraction(GameContext *ctx);
     void DrawGameScene(GameContext *ctx);
+    int CompareScores(const void *a, const void *b);
 
     int min(int a, int b);
+    int max(int a, int b);
 
 //--------------------------------------------------------------------------------------
 // Main Entry Point
@@ -157,21 +177,21 @@ int main(void) {
     return 0;
 }
 
-void MoveEntity(GameContext *ctx, MovingEntity *entity, CellType entityCellType, Vector2 *pos, Direction *dir, bool isRobot) {
+void MoveEntity(GameContext *ctx, MovingEntity *entity, CellType entityCellType, Vector2 *pos, Direction *dir) {
     Vector2* dirVec = &DIR_VECTORS[*dir];
     Vector2 futurePos = Vector2Add(*pos, *dirVec); 
     // check its not outside the grid
-    if (   futurePos.x > GRID_WIDTH  || futurePos.x <= 0
-        || futurePos.y > GRID_HEIGHT || futurePos.y <= 0) return;
+    if (   futurePos.x >= GRID_WIDTH  || futurePos.x < 0
+        || futurePos.y >= GRID_HEIGHT || futurePos.y < 0) return;
     
 
     CellType futureCell = ctx->grid[(int)futurePos.x][(int)futurePos.y];
     // if robot collides with person
     if (futureCell == CELL_PERSON) {
         // only robots can interact
-        if (!isRobot) return;
+        if (entityCellType != CELL_ROBOT) return;
 
-        ctx->peopleRemaining =+ -1;
+        ctx->peopleRemaining += -1;
         // disable the person
         // do so by first finding them, then setting their coords to invalid values
         for (int i=0; i<NUM_PEOPLE; i++) {
@@ -183,14 +203,16 @@ void MoveEntity(GameContext *ctx, MovingEntity *entity, CellType entityCellType,
         // dont return, which causes the robot to move onwards
     }
 
-    if (futureCell == CELL_WALL || futureCell == CELL_MINE) {
-        if (isRobot) {
-            ctx->livesRemaining =+ -1;
+    if (((futureCell == CELL_WALL || futureCell == CELL_MINE) && entityCellType == CELL_ROBOT)
+         || (futureCell == CELL_ROBOT && entityCellType == CELL_MINE) ) {
+            ctx->livesRemaining += -1;
             // reset pos
+            ctx->grid[(int)pos->x][(int)pos->y] = CELL_AIR;
             ctx->robot.position = (Vector2){3*GRID_HEIGHT/4, GRID_WIDTH/4};
-        }
-        return;
+        if (entityCellType == CELL_ROBOT) return;
     }
+
+    if (futureCell == CELL_WALL) return;
 
     ctx->grid[(int)pos->x][(int)pos->y] = CELL_AIR;
     *pos = futurePos;
@@ -204,16 +226,223 @@ void MoveMovingEntity(GameContext *ctx, MovingEntity *entity, CellType entityCel
         entity->direction = (entity->direction + rand() % 2) % 4;
     }
     if (rand() < entity->liklihoodToMove * RAND_MAX) {
-        MoveEntity(ctx, entity, entityCellType, &entity->position, &entity->direction, false);
+        MoveEntity(ctx, entity, entityCellType, &entity->position, &entity->direction);
     }
 }
 
-void TurnRobotWithAI(GameContext *ctx) {
-    // Calculate Weighted A* Algo path
-    // Store, so we can display to user
-    
-    // Turn in direction necessary to reach next node in path
+typedef struct {
+    int x, y;
+    int gCost; // Distance from start
+    int hCost; // Distance to end (Heuristic)
+    int fCost; // G + H
+    int parentX, parentY; // For retracing the path
+    bool closed; // If true, node has been evaluated
+    bool open;   // If true, node is in the queue to be evaluated
+} Node;
 
+// Simple Manhattan Distance Heuristic
+int GetDistance(int x1, int y1, int x2, int y2) {
+    return abs(x1 - x2) + abs(y1 - y2);
+}
+
+bool IsNearMine(GameContext *ctx, int x, int y) {
+    // Check all 8 surrounding neighbors (diagonals included)
+    for (int dx = -1; dx <= 1; dx++) {
+        for (int dy = -1; dy <= 1; dy++) {
+            if (dx == 0 && dy == 0) continue; // Skip the center tile itself
+            
+            int nx = x + dx;
+            int ny = y + dy;
+            
+            // Bounds check
+            if (nx >= 0 && nx < GRID_WIDTH && ny >= 0 && ny < GRID_HEIGHT) {
+                if (ctx->grid[nx][ny] == CELL_MINE) return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Scans a radius around (x,y) to find the distance to the closest mine.
+// Returns a high number if safe, low number if dangerous.
+int GetLocalSafetyScore(GameContext *ctx, int x, int y, int radius) {
+    int closestMineDist = 999;
+    
+    for (int dx = -radius; dx <= radius; dx++) {
+        for (int dy = -radius; dy <= radius; dy++) {
+            int nx = x + dx;
+            int ny = y + dy;
+            
+            if (nx >= 0 && nx < GRID_WIDTH && ny >= 0 && ny < GRID_HEIGHT) {
+                if (ctx->grid[nx][ny] == CELL_MINE) {
+                    int dist = abs(dx) + abs(dy); // Manhattan distance to the hazard
+                    if (dist < closestMineDist) closestMineDist = dist;
+                }
+            }
+        }
+    }
+    return closestMineDist;
+}
+
+void move_robot_ai(GameContext *ctx) {
+    // 1. CLEAR PREVIOUS PATH
+    ctx->currentPathLen = 0;
+
+    // 2. FIND TARGET
+    Vector2 startPos = ctx->robot.position;
+    Vector2 targetPos = {-1, -1};
+    int shortestDist = 99999;
+
+    for (int i = 0; i < 5; i++) {
+        if (ctx->people[i].position.x != -1) {
+            int dist = GetDistance((int)startPos.x, (int)startPos.y, 
+                                   (int)ctx->people[i].position.x, (int)ctx->people[i].position.y);
+            if (dist < shortestDist) {
+                shortestDist = dist;
+                targetPos = ctx->people[i].position;
+            }
+        }
+    }
+
+    // If no target, we skip A* and go straight to fallback
+    if (targetPos.x != -1) {
+
+        // 3. INITIALIZE A* DATA
+        static Node nodes[GRID_WIDTH][GRID_HEIGHT]; 
+        for (int x = 0; x < GRID_WIDTH; x++) {
+            for (int y = 0; y < GRID_HEIGHT; y++) {
+                nodes[x][y] = (Node){x, y, 9999, 9999, 9999, -1, -1, false, false};
+            }
+        }
+
+        int startX = (int)startPos.x;
+        int startY = (int)startPos.y;
+        int targetX = (int)targetPos.x;
+        int targetY = (int)targetPos.y;
+
+        nodes[startX][startY].gCost = 0;
+        nodes[startX][startY].hCost = GetDistance(startX, startY, targetX, targetY);
+        nodes[startX][startY].fCost = nodes[startX][startY].hCost;
+        nodes[startX][startY].open = true;
+
+        // 4. MAIN A* LOOP
+        while (true) {
+            Node* current = NULL;
+            int lowestF = 999999;
+
+            for (int x = 0; x < GRID_WIDTH; x++) {
+                for (int y = 0; y < GRID_HEIGHT; y++) {
+                    if (nodes[x][y].open && nodes[x][y].fCost < lowestF) {
+                        current = &nodes[x][y];
+                        lowestF = nodes[x][y].fCost;
+                    }
+                }
+            }
+
+            // FIX 1: If no path found, BREAK (don't return) so we can run the fallback logic
+            if (current == NULL) break; 
+
+            if (current->x == targetX && current->y == targetY) {
+                // Retrace path
+                int traceX = targetX;
+                int traceY = targetY;
+                while (traceX != -1 && traceY != -1) {
+                    if (traceX == startX && traceY == startY) break;
+                    ctx->currentPath[ctx->currentPathLen] = (Vector2){(float)traceX, (float)traceY};
+                    ctx->currentPathLen++;
+                    int pX = nodes[traceX][traceY].parentX;
+                    int pY = nodes[traceX][traceY].parentY;
+                    traceX = pX;
+                    traceY = pY;
+                }
+                break;
+            }
+
+            current->open = false;
+            current->closed = true;
+
+            int dirX[] = {0, 1, 0, -1};
+            int dirY[] = {-1, 0, 1, 0};
+
+            for (int i = 0; i < 4; i++) {
+                int checkX = current->x + dirX[i];
+                int checkY = current->y + dirY[i];
+
+                if (checkX < 0 || checkX >= GRID_WIDTH || checkY < 0 || checkY >= GRID_HEIGHT) continue;
+                
+                int cell = ctx->grid[checkX][checkY];
+                if (cell == CELL_WALL || cell == CELL_MINE) continue;
+                if (nodes[checkX][checkY].closed) continue;
+
+                // FIX 2: Soft Penalty instead of Hard Wall
+                // If tile is near a mine, add 20 to the cost (robot will detour if possible)
+                // But it WILL go there if it's the only path.
+                int dangerPenalty = 0;
+                if (IsNearMine(ctx, checkX, checkY)) dangerPenalty = 20;
+
+                int moveCost = nodes[current->x][current->y].gCost + 1 + dangerPenalty;
+
+                if (moveCost < nodes[checkX][checkY].gCost || !nodes[checkX][checkY].open) {
+                    nodes[checkX][checkY].gCost = moveCost;
+                    // Ensure you have this multiplier variable in your struct, or use 1.5f directly
+                    nodes[checkX][checkY].hCost = (int)(GetDistance(checkX, checkY, targetX, targetY) * ctx->AStarHeuristicWeightage); 
+                    nodes[checkX][checkY].fCost = nodes[checkX][checkY].gCost + nodes[checkX][checkY].hCost;
+                    nodes[checkX][checkY].parentX = current->x;
+                    nodes[checkX][checkY].parentY = current->y;
+                    nodes[checkX][checkY].open = true;
+                }
+            }
+        }
+    }
+
+    // 5. EXECUTE MOVE (Or Fallback)
+    if (ctx->currentPathLen > 0) {
+        Vector2 nextStep = ctx->currentPath[ctx->currentPathLen - 1];
+        
+        int dx = (int)nextStep.x - (int)startPos.x;
+        int dy = (int)nextStep.y - (int)startPos.y;
+
+        if (dy == -1) ctx->robot.direction = NORTH;
+        if (dx == 1)  ctx->robot.direction = EAST;
+        if (dy == 1)  ctx->robot.direction = SOUTH;
+        if (dx == -1) ctx->robot.direction = WEST;
+    }
+    else {
+        // FALLBACK: Run the Survival Logic
+        // (This code remains exactly as we wrote it in the previous step)
+        int bestScore = -1;
+        Vector2 bestMove = {-1, -1};
+        Direction bestDir = ctx->robot.direction; 
+        
+        int dx[] = {0, 1, 0, -1};
+        int dy[] = {-1, 0, 1, 0};
+        Direction dirs[] = {NORTH, EAST, SOUTH, WEST};
+        int startIdx = rand() % 4;
+
+        for (int i = 0; i < 4; i++) {
+            int idx = (startIdx + i) % 4;
+            int nx = (int)startPos.x + dx[idx];
+            int ny = (int)startPos.y + dy[idx];
+
+            if (nx < 0 || nx >= GRID_WIDTH || ny < 0 || ny >= GRID_HEIGHT) continue;
+            if (ctx->grid[nx][ny] == CELL_WALL || ctx->grid[nx][ny] == CELL_MINE) continue;
+
+            int score = GetLocalSafetyScore(ctx, nx, ny, 4);
+            if (score > bestScore) {
+                bestScore = score;
+                bestMove = (Vector2){(float)nx, (float)ny};
+                bestDir = dirs[idx];
+            }
+        }
+        
+        if (bestMove.x != -1) {
+            ctx->robot.direction = bestDir;
+            ctx->currentPath[0] = bestMove;
+            ctx->currentPathLen = 1;
+        } else {
+            ctx->robot.direction = (Direction)((ctx->robot.direction + 2) % 4);
+        }
+    }
 }
                 
 Direction GetCameraForwardDirection(Camera3D camera) {
@@ -241,31 +470,83 @@ void TurnRobotWithUserInputs(GameContext *ctx) {
 // State Functions
 //--------------------------------------------------------------------------------------
 void UpdateDrawMenu(GameContext *ctx) {
-    // Update
-    if (IsKeyPressed(KEY_ENTER) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || IsKeyPressed(KEY_SPACE))
+    // 1. HANDLE TEXT INPUT
+    // GetCharPressed() returns the key code of the character pressed
+    int key = GetCharPressed();
+
+    // Check if more characters have been pressed on the same frame
+    while (key > 0)
+    {
+        // Allow only alphanumeric characters (No spaces or commas to keep file IO simple)
+        if ((key >= 32) && (key <= 125) && (ctx->usernameLen < 15) && isalnum(key))
+        {
+            ctx->username[ctx->usernameLen] = (char)key;
+            ctx->username[ctx->usernameLen + 1] = '\0'; // Add null terminator
+            ctx->usernameLen++;
+        }
+        key = GetCharPressed();  // Check next character in queue
+    }
+
+    if (IsKeyPressed(KEY_BACKSPACE))
+    {
+        if (ctx->usernameLen > 0)
+        {
+            ctx->usernameLen--;
+            ctx->username[ctx->usernameLen] = '\0';
+        }
+    }
+
+    // 2. START GAME LOGIC
+    // Only allow start if they have typed a name
+    if ((IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) && ctx->usernameLen > 0)
     {
         ctx->currentLevel = 0;
         ctx->score = 0;
-        AdvanceLevel(ctx); // Clear grid and setup level 1
+        AdvanceLevel(ctx); 
         ctx->currentState = STATE_PLAYING;
     }
 
-    // Draw
+    // 3. DRAWING
     BeginDrawing();
         ClearBackground(RAYWHITE);
-        DrawText("ROBOT RESCUE", GetScreenWidth()/2 - 150, GetScreenHeight()/4, 40, DARKBLUE);
-        DrawText("Press [SPACE] to Start Level 1", GetScreenWidth()/2 - 140, GetScreenHeight()/4 + 50, 20, DARKGRAY);
+        int centerX = GetScreenWidth() / 2;
+
+        // Title
+        DrawText("ROBOT RESCUE", centerX - MeasureText("ROBOT RESCUE", 40)/2, 60, 40, DARKBLUE);
+
+        // Input Box
+        DrawText("ENTER USERNAME:", centerX - MeasureText("ENTER USERNAME:", 20)/2, 140, 20, DARKGRAY);
+        
+        // Draw the name or a blinking cursor
+        char *displayName = TextFormat("%s_", ctx->username);
+        DrawText(displayName, centerX - MeasureText(displayName, 30)/2, 170, 30, BLACK);
+        
+        if (ctx->usernameLen == 0) {
+            DrawText("(Type name to start)", centerX - MeasureText("(Type name to start)", 15)/2, 205, 15, LIGHTGRAY);
+        } else {
+             DrawText("Press [ENTER] to Start", centerX - MeasureText("Press [ENTER] to Start", 20)/2, 205, 20, DARKGREEN);
+        }
+
+        // Instructions
+        int instrY = 280;
+        DrawText("--- INSTRUCTIONS ---", centerX - MeasureText("--- INSTRUCTIONS ---", 20)/2, instrY, 20, GRAY);
+        
+        instrY += 30;
+        DrawText("CONTROLS: Use [WASD] or [ARROW KEYS] to move.", centerX - MeasureText("CONTROLS: Use [WASD] or [ARROW KEYS] to move.", 18)/2, instrY, 18, DARKGRAY);
+        
+        instrY += 25;
+        const char* goal = "GOAL: Collect GREEN people. Avoid RED mines and Walls.";
+        DrawText(goal, centerX - MeasureText(goal, 18)/2, instrY, 18, DARKGRAY);
+
+        instrY += 25;
+        DrawText("You have 5 batteries (lives). Good luck!", centerX - MeasureText("You have 5 batteries (lives). Good luck!", 18)/2, instrY, 18, DARKGRAY);
+
     EndDrawing();
 }
 
 void UpdateDrawGameplay(GameContext *ctx) {
-    ctx->frameCount++;
-
     // Update
-    if (IsKeyPressed(KEY_O)) ctx->orbitMode = !ctx->orbitMode;
-    
-    // Toggle state to Game Over (Temporary - press G to die)
-    if (IsKeyPressed(KEY_G)) ctx->currentState = STATE_GAME_OVER;
+    if (IsKeyPressed(KEY_O)) ctx->orbitMode = !ctx->orbitMode;    
 
     // Pause and unpause logic
     if (IsKeyPressed(KEY_SPACE)) ctx->paused = !ctx->paused;
@@ -273,16 +554,25 @@ void UpdateDrawGameplay(GameContext *ctx) {
     // Change player mode logic
     if (IsKeyPressed(KEY_M)) ctx->aiModeEnabled = !ctx->aiModeEnabled;
 
+    if (IsKeyPressed(KEY_PERIOD)) ctx->AStarHeuristicWeightage += 0.05f;
+    if (IsKeyPressed(KEY_COMMA)) ctx->AStarHeuristicWeightage -= 0.05f;
+
     // For debugging
-        // if(IsKeyPressed(KEY_L)) ctx->livesRemaining += 1;
-        // if(IsKeyPressed(KEY_K)) ctx->livesRemaining += -1;
+    //     if(IsKeyPressed(KEY_L)) ctx->livesRemaining += 1;
+    //     if(IsKeyPressed(KEY_K)) ctx->livesRemaining += -1;
+    //     printf("Lives remaining: %d", ctx->livesRemaining);
+        // if(IsKeyPressed(KEY_L)) ctx->peopleRemaining += 1;
+        // if(IsKeyPressed(KEY_K)) ctx->peopleRemaining += -1;
+        // printf("People remaining: %d\n", ctx->peopleRemaining);
+        if(IsKeyPressed(KEY_U)) AdvanceLevel(ctx);
+
 
 
     UpdateCustomCamera(&ctx->camera, &ctx->orbitMode);
     HandleGridInteraction(ctx);
 
-    if (!ctx->paused)
-    { // Gameplay: Inputs, entity movement, etc 
+    if (!ctx->paused) { // Gameplay: Inputs, entity movement, etc 
+        ctx->frameCount++;
         // Move entities
             // People
             for (int i=0; i<NUM_PEOPLE; i++) {
@@ -298,13 +588,19 @@ void UpdateDrawGameplay(GameContext *ctx) {
         // if ai, then run A* before every move, so both things have the cooldown
         if (!ctx->aiModeEnabled) TurnRobotWithUserInputs(ctx);
 
-        if (ctx->frameCount % (ctx->robot.moveCooldown)/(1+IsKeyDown(KEY_LEFT_SHIFT)) == 0) {
-            if (ctx->aiModeEnabled) { TurnRobotWithAI(ctx);}
+        int effectiveCooldown = ctx->robot.moveCooldown / (1 + IsKeyDown(KEY_LEFT_SHIFT));
+        if (effectiveCooldown < 1) effectiveCooldown = 1;
+        if (ctx->frameCount % effectiveCooldown == 0) {
+            if (ctx->aiModeEnabled) move_robot_ai(ctx);
             // Move robot
             // ctx->robot.position;
-            MoveEntity(ctx, (MovingEntity*)&ctx->robot, CELL_ROBOT, &ctx->robot.position, &ctx->robot.direction, true);
+            MoveEntity(ctx, (MovingEntity*)&ctx->robot, CELL_ROBOT, &ctx->robot.position, &ctx->robot.direction);
         }
 
+        // check level advancement condition
+        if (ctx->peopleRemaining <= 0) AdvanceLevel(ctx);
+        // check death condition
+        if (ctx->livesRemaining <= 0) ctx->currentState = STATE_GAME_OVER;
     }
 
     // Draw
@@ -318,30 +614,99 @@ void UpdateDrawGameplay(GameContext *ctx) {
 }
 
 void UpdateDrawGameOver(GameContext *ctx) {
-    // Update
+    static bool isDataProcessed = false;
+    static ScoreEntry topScores[MAX_LEADERBOARD_ENTRIES];
+    static int totalScoresLoaded = 0;
+    static int currentRunDuration = 0;
+
+    // 1. ONE-TIME LOGIC (Save & Load)
+    if (!isDataProcessed) {
+        currentRunDuration = ctx->frameCount / 60;
+
+        // A. APPEND CURRENT SCORE TO FILE (Format: Name,Level,Time)
+        FILE *file = fopen("leaderboard.txt", "a");
+        if (file != NULL) {
+            // Default to "Unknown" if name somehow empty
+            if (ctx->usernameLen == 0) strcpy(ctx->username, "Unknown");
+            
+            fprintf(file, "%s,%d,%d\n", ctx->username, ctx->currentLevel, currentRunDuration);
+            fclose(file);
+        }
+
+        // B. READ ALL SCORES FROM FILE
+        totalScoresLoaded = 0;
+        file = fopen("leaderboard.txt", "r");
+        if (file != NULL) {
+            // Scan format: String(up to comma), Integer, Integer
+            // %19[^,] means "Read up to 19 chars or until a comma is found"
+            while (fscanf(file, "%19[^,],%d,%d\n", 
+                   topScores[totalScoresLoaded].name, 
+                   &topScores[totalScoresLoaded].level, 
+                   &topScores[totalScoresLoaded].duration) == 3) 
+            {
+                totalScoresLoaded++;
+                if (totalScoresLoaded >= MAX_LEADERBOARD_ENTRIES) break;
+            }
+            fclose(file);
+        }
+
+        // C. SORT THE SCORES
+        if (totalScoresLoaded > 0) {
+            qsort(topScores, totalScoresLoaded, sizeof(ScoreEntry), CompareScores);
+        }
+
+        isDataProcessed = true;
+    }
+
+    // 2. INPUT HANDLING
     if (IsKeyPressed(KEY_ENTER))
     {
-        // Restart Game
-            ctx->currentState = STATE_MENU;
-            ctx->currentLevel = 1;
-            ctx->score = 0;
-            ctx->orbitMode = true;
-            ctx->lastGridCellFocused = (Vector2){-1, -1};
-            ctx->gridCellFocused = (Vector2){-1, -1};
+        isDataProcessed = false; 
+        
+        // Reset Logic
+        ctx->lastGridCellFocused = (Vector2){-1, -1};
+        ctx->gridCellFocused = (Vector2){-1, -1};
+        ctx->frameCount = 0;
+        ctx->livesRemaining = 5;
         ctx->currentState = STATE_MENU;
     }
 
-    // Draw
+    // 3. DRAWING
     BeginDrawing();
         ClearBackground(BLACK);
-        DrawText("GAME OVER", 300, 100, 40, RED);
-        
-        DrawText("Leaderboard Placeholder:", 300, 180, 20, WHITE);
-        DrawText("1. AAA - 500", 300, 210, 20, GRAY);
-        DrawText("2. BBB - 300", 300, 240, 20, GRAY);
-        DrawText("3. CCC - 100", 300, 270, 20, GRAY);
 
-        DrawText("Press [ENTER] to Return to Menu", 240, 350, 20, WHITE);
+        int centerX = GetScreenWidth() / 2;
+        int y = 50;
+
+        DrawText("GAME OVER", centerX - MeasureText("GAME OVER", 40)/2, y, 40, RED);
+        y += 60;
+
+        const char* scoreText = TextFormat("%s, you reached Level %d in %d seconds", ctx->username, ctx->currentLevel, currentRunDuration);
+        DrawText(scoreText, centerX - MeasureText(scoreText, 20)/2, y, 20, YELLOW);
+        y += 50;
+        
+        DrawText("--- LEADERBOARD ---", centerX - MeasureText("--- LEADERBOARD ---", 20)/2, y, 20, WHITE);
+        y += 30;
+
+        for (int i = 0; i < totalScoresLoaded && i < LEADERBOARD_DISPLAY_LIMIT; i++) {
+            Color rowColor = (i == 0) ? GOLD : (i == 1) ? LIGHTGRAY : (i == 2) ? BROWN : GRAY;
+            
+            // Format: "1. Name - Lvl 5 - 40s"
+            const char* entryText = TextFormat("%d. %s - Lvl %d - %ds", 
+                i + 1, topScores[i].name, topScores[i].level, topScores[i].duration);
+                
+            DrawText(entryText, centerX - MeasureText(entryText, 20)/2, y, 20, rowColor);
+            y += 30;
+        }
+
+        if (totalScoresLoaded == 0) {
+            const char* noScores = "No previous scores found.";
+            DrawText(noScores, centerX - MeasureText(noScores, 20)/2, y, 20, DARKGRAY);
+        }
+
+        const char* prompt = "Press [ENTER] to Return to Menu";
+        DrawText(prompt, centerX - MeasureText(prompt, 20)/2, GetScreenHeight() - 50, 20, WHITE);
+
     EndDrawing();
 }
 
@@ -371,6 +736,11 @@ void InitGame(GameContext *ctx) {
 
     ctx->peopleMaxMovesPerSec = 3.0f;
     ctx->minesMaxMovesPerSec = 5.0f;
+
+    ctx->username[0] = '\0';
+    ctx->usernameLen = 0;
+    
+    ctx->AStarHeuristicWeightage = 1.5f;
 
     // Setup Camera
     ctx->camera.position = (Vector3){ 0.0f, 20.0f, 20.0f };
@@ -412,8 +782,13 @@ void AdvanceLevel(GameContext *ctx) {
     ctx->grid[3*GRID_HEIGHT/4][GRID_WIDTH/4] = CELL_ROBOT;
     const int maxMines = 50;
     ctx->mineCount = min(ctx->currentLevel*5, maxMines);
+    ctx->robot.moveCooldown = max(1, ctx->robot.moveCooldown - 1);
+    if (ctx->robot.moveCooldown > 1) {
+        ctx->robot.moveCooldown += - 1;
+    } else {
+        SetTargetFPS(max(60 + 10*(ctx->currentLevel - 30), 60));
+    }
     
-    // 
     ctx->mines = realloc(ctx->mines, sizeof(MovingEntity)*ctx->mineCount);
     if (ctx->mines == NULL) {
         printf("\nrealloc() failed. No free space in memory. Program exiting.\n");
@@ -564,6 +939,7 @@ void HandleGridInteraction(GameContext *ctx) {
     ctx->lastGridCellFocused = (Vector2){ -1, -1 };
 }
 
+// This code is not mine. I took it from an example from the raylib github repo
 static void DrawTextCodepoint3D(Font font, int codepoint, Vector3 position, float fontSize, bool backface, Color tint) {
     // Character index position in sprite font
     // NOTE: In case a codepoint is not available in the font, index returned points to '?'
@@ -628,6 +1004,7 @@ static void DrawTextCodepoint3D(Font font, int codepoint, Vector3 position, floa
 }
 
 // Draw a 2D text in 3D space
+// This code is not mine. I took it from an example from the raylib github repo
 static void DrawText3D(Font font, const char *text, Vector3 position, float fontSize, float fontSpacing, float lineSpacing, bool backface, Color tint) {
     int length = TextLength(text);          // Total length in bytes of the text, scanned by codepoints in loop
     
@@ -682,7 +1059,7 @@ void Draw3DHUD(GameContext *ctx) {
 
     // --- NORTH EDGE (Controls) ---
     rlPushMatrix();
-        const char* txtNorth = "L-Click: Paint | R-Click: Erase | M-Click: Pan | Space: Pause";
+        const char* txtNorth = "L-Click : Paint | R-Click : Erase | M-Click : Pan | O : Orbit\n Space : Pause | L-Shift : Sprint | </> : change A* Heuristic weighting";
         // Measure exact width
         float widthN = MeasureTextEx(font, txtNorth, (float)font.baseSize, 1.0f).x * fontScale;
         
@@ -699,7 +1076,7 @@ void Draw3DHUD(GameContext *ctx) {
             rlTranslatef(-widthN/2, 0, 0);      // Move back
         }
 
-        DrawText3D(font, txtNorth, (Vector3){0,0,-1.0f}, fontSize, spacing, 0, true, DARKGRAY);
+        DrawText3D(font, txtNorth, (Vector3){0,0,-6.0f}, fontSize, spacing, 0, true, DARKGRAY);
     rlPopMatrix();
 
 
@@ -721,13 +1098,13 @@ void Draw3DHUD(GameContext *ctx) {
             rlTranslatef(-widthS/2, 0, 0); 
         }
 
-        DrawText3D(font, txtSouth, (Vector3){0,0,-1.0f}, fontSize, spacing, 0, true, BLACK);
+        DrawText3D(font, txtSouth, (Vector3){0,0,-2.5f}, fontSize, spacing, 0, true, BLACK);
     rlPopMatrix();
 
 
     // --- WEST EDGE (Mode) ---
     rlPushMatrix();
-        const char* txtWest = TextFormat("Mode: %s", ctx->aiModeEnabled ? "AI" : "MANUAL");
+        const char* txtWest = TextFormat("Mode: %s\nA* Heuristic weighting: %.2f", ctx->aiModeEnabled ? "AI" : "MANUAL", ctx->AStarHeuristicWeightage);
         float widthW = MeasureTextEx(font, txtWest, (float)font.baseSize, 1.0f).x * fontScale;
 
         // Position: Left Center, outside (-X)
@@ -746,7 +1123,7 @@ void Draw3DHUD(GameContext *ctx) {
              rlTranslatef(-widthW/2, 0, 0);
         }
 
-        DrawText3D(font, txtWest, (Vector3){0,0,-1.0f}, fontSize, spacing, 0, true, BLUE);
+        DrawText3D(font, txtWest, (Vector3){0,0,-6.0f}, fontSize, spacing, 0, true, BLUE);
     rlPopMatrix();
 
 
@@ -937,6 +1314,29 @@ void DrawGameScene(GameContext *ctx) {
 
     BeginMode3D(ctx->camera);
 
+    // Draw A* path
+    if (ctx->aiModeEnabled && ctx->currentPathLen > 0) {
+        // Draw line from robot to first node
+        Vector3 start = { 
+            (ctx->robot.position.x * CELL_SIZE) + CELL_SIZE/2, 
+            0.5f, 
+            (ctx->robot.position.y * CELL_SIZE) + CELL_SIZE/2 
+        };
+        
+        // Draw the rest of the path
+        for (int i = ctx->currentPathLen - 1; i >= 0; i--) {
+            Vector3 end = { 
+                (ctx->currentPath[i].x * CELL_SIZE) + CELL_SIZE/2, 
+                0.5f, 
+                (ctx->currentPath[i].y * CELL_SIZE) + CELL_SIZE/2 
+            };
+            
+            DrawLine3D(start, end, RED);
+            DrawCube(end, 0.5f, 0.5f, 0.5f, RED); // Small node marker
+            start = end; // Move start to current for next segment
+        }
+    }
+    
     // Draw UI text at the edges of the grid
     Draw3DHUD(ctx);
 
@@ -1017,4 +1417,20 @@ void PaintGridLine(GameContext *ctx, int x0, int y0, int x1, int y1, int value) 
 
 int min(int a, int b) {
     return a < b ? a : b;
+}
+
+int max(int a, int b) {
+    return a > b ? a : b;
+}
+
+int CompareScores(const void *a, const void *b) {
+    ScoreEntry *entryA = (ScoreEntry *)a;
+    ScoreEntry *entryB = (ScoreEntry *)b;
+
+    // Higher level is better
+    if (entryB->level != entryA->level) {
+        return entryB->level - entryA->level;
+    }
+    // If levels are equal, shorter duration is better (survival)
+    return entryA->duration - entryB->duration;
 }
